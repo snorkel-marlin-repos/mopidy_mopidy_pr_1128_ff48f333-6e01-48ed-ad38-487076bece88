@@ -1,12 +1,11 @@
-from __future__ import (
-    absolute_import, division, print_function, unicode_literals)
+from __future__ import absolute_import, division, unicode_literals
 
 import collections
 
 import pygst
 pygst.require('0.10')
 import gst  # noqa
-import gst.pbutils  # noqa
+import gst.pbutils
 
 from mopidy import exceptions
 from mopidy.audio import utils
@@ -15,7 +14,7 @@ from mopidy.utils import encoding
 _missing_plugin_desc = gst.pbutils.missing_plugin_message_get_description
 
 _Result = collections.namedtuple(
-    'Result', ('uri', 'tags', 'duration', 'seekable', 'mime', 'playable'))
+    'Result', ('uri', 'tags', 'duration', 'seekable', 'mime'))
 
 _RAW_AUDIO = gst.Caps(b'audio/x-raw-int; audio/x-raw-float')
 
@@ -53,14 +52,14 @@ class Scanner(object):
 
         try:
             _start_pipeline(pipeline)
-            tags, mime, have_audio = _process(pipeline, self._timeout_ms)
+            tags, mime = _process(pipeline, self._timeout_ms)
             duration = _query_duration(pipeline)
             seekable = _query_seekable(pipeline)
         finally:
             pipeline.set_state(gst.STATE_NULL)
             del pipeline
 
-        return _Result(uri, tags, duration, seekable, mime, have_audio)
+        return _Result(uri, tags, duration, seekable, mime)
 
 
 # Turns out it's _much_ faster to just create a new pipeline for every as
@@ -72,39 +71,31 @@ def _setup_pipeline(uri, proxy_config=None):
 
     typefind = gst.element_factory_make('typefind')
     decodebin = gst.element_factory_make('decodebin2')
+    sink = gst.element_factory_make('fakesink')
 
     pipeline = gst.element_factory_make('pipeline')
-    for e in (src, typefind, decodebin):
+    for e in (src, typefind, decodebin, sink):
         pipeline.add(e)
     gst.element_link_many(src, typefind, decodebin)
 
     if proxy_config:
         utils.setup_proxy(src, proxy_config)
 
+    decodebin.set_property('caps', _RAW_AUDIO)
+    decodebin.connect('pad-added', _pad_added, sink)
     typefind.connect('have-type', _have_type, decodebin)
-    decodebin.connect('pad-added', _pad_added, pipeline)
 
     return pipeline
 
 
 def _have_type(element, probability, caps, decodebin):
     decodebin.set_property('sink-caps', caps)
-    struct = gst.Structure('have-type')
-    struct['caps'] = caps.get_structure(0)
-    element.get_bus().post(gst.message_new_application(element, struct))
+    msg = gst.message_new_application(element, caps.get_structure(0))
+    element.get_bus().post(msg)
 
 
-def _pad_added(element, pad, pipeline):
-    sink = gst.element_factory_make('fakesink')
-    sink.set_property('sync', False)
-
-    pipeline.add(sink)
-    sink.sync_state_with_parent()
-    pad.link(sink.get_pad('sink'))
-
-    if pad.get_caps().is_subset(_RAW_AUDIO):
-        struct = gst.Structure('have-audio')
-        element.get_bus().post(gst.message_new_application(element, struct))
+def _pad_added(element, pad, sink):
+    return pad.link(sink.get_pad('sink'))
 
 
 def _start_pipeline(pipeline):
@@ -134,7 +125,7 @@ def _process(pipeline, timeout_ms):
     clock = pipeline.get_clock()
     bus = pipeline.get_bus()
     timeout = timeout_ms * gst.MSECOND
-    tags, mime, have_audio, missing_description = {}, None, False, None
+    tags, mime, missing_description = {}, None, None
 
     types = (gst.MESSAGE_ELEMENT | gst.MESSAGE_APPLICATION | gst.MESSAGE_ERROR
              | gst.MESSAGE_EOS | gst.MESSAGE_ASYNC_DONE | gst.MESSAGE_TAG)
@@ -150,22 +141,19 @@ def _process(pipeline, timeout_ms):
                 missing_description = encoding.locale_decode(
                     _missing_plugin_desc(message))
         elif message.type == gst.MESSAGE_APPLICATION:
-            if message.structure.get_name() == 'have-type':
-                mime = message.structure['caps'].get_name()
-                if mime.startswith('text/') or mime == 'application/xml':
-                    return tags, mime, have_audio
-            elif message.structure.get_name() == 'have-audio':
-                have_audio = True
+            mime = message.structure.get_name()
+            if mime.startswith('text/') or mime == 'application/xml':
+                return tags, mime
         elif message.type == gst.MESSAGE_ERROR:
             error = encoding.locale_decode(message.parse_error()[0])
             if missing_description:
                 error = '%s (%s)' % (missing_description, error)
             raise exceptions.ScannerError(error)
         elif message.type == gst.MESSAGE_EOS:
-            return tags, mime, have_audio
+            return tags, mime
         elif message.type == gst.MESSAGE_ASYNC_DONE:
             if message.src == pipeline:
-                return tags, mime, have_audio
+                return tags, mime
         elif message.type == gst.MESSAGE_TAG:
             taglist = message.parse_tag()
             # Note that this will only keep the last tag.
@@ -174,28 +162,3 @@ def _process(pipeline, timeout_ms):
         timeout -= clock.get_time() - start
 
     raise exceptions.ScannerError('Timeout after %dms' % timeout_ms)
-
-
-if __name__ == '__main__':
-    import os
-    import sys
-
-    import gobject
-
-    from mopidy.utils import path
-
-    gobject.threads_init()
-
-    scanner = Scanner(5000)
-    for uri in sys.argv[1:]:
-        if not gst.uri_is_valid(uri):
-            uri = path.path_to_uri(os.path.abspath(uri))
-        try:
-            result = scanner.scan(uri)
-            for key in ('uri', 'mime', 'duration', 'playable', 'seekable'):
-                print('%-20s   %s' % (key, getattr(result, key)))
-            print('tags')
-            for tag, value in result.tags.items():
-                print('%-20s   %s' % (tag, value))
-        except exceptions.ScannerError as error:
-            print('%s: %s' % (uri, error))

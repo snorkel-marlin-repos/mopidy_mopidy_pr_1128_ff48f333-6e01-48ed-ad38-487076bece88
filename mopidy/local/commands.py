@@ -136,9 +136,7 @@ class ScanCommand(commands.Command):
                 file_uri = path.path_to_uri(os.path.join(media_dir, relpath))
                 result = scanner.scan(file_uri)
                 tags, duration = result.tags, result.duration
-                if not result.playable:
-                    logger.warning('Failed %s: No audio found in file.', uri)
-                elif duration < MIN_DURATION_MS:
+                if duration < MIN_DURATION_MS:
                     logger.warning('Failed %s: Track shorter than %dms',
                                    uri, MIN_DURATION_MS)
                 else:
