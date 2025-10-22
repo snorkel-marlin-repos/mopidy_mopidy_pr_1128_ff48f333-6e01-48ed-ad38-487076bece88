@@ -8,7 +8,7 @@ import gobject
 import pygst
 pygst.require('0.10')
 import gst  # noqa
-import gst.pbutils  # noqa
+import gst.pbutils
 
 import pykka
 
